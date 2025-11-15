@@ -7,4 +7,4 @@ GitHub Wiki에 정리되어 있습니다:
 https://github.com/Hoon-Danbi/tiltrotor_offboard_mission/wiki
 
 🔗 **Installation & Setup Guide:**  
-https://github.com/Hoon-Danbi/tiltrotor_offboard_mission/wiki/Installation-and-Setup
+https://github.com/Hoon-Danbi/tiltrotor_offboard_mission.wiki.git
