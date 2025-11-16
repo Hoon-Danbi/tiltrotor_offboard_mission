@@ -19,12 +19,17 @@ find_package(px4_msgs REQUIRED)
 # 실행파일 추가
 add_executable(offboard_mission_node
   src/offboard_mission_node.cpp
-)
+  )
 
 # 타겟에 의존성 연결
 ament_target_dependencies(offboard_mission_node
   rclcpp
   px4_msgs
+)
+
+target_include_directories(offboard_mission_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
 )
 
 # 설치 경로 설정
