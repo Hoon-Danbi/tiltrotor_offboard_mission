@@ -1,17 +1,21 @@
 /****************************************************************************
- * PX4 Offboard mission with simple Mission State Machine
+ * PX4 Offboard mission with Mission State Machine + PX4 interface layer
  *
  * - MissionPhase FSM:
  *   IDLE -> TAKEOFF -> HOVER -> DONE
  *
- *   나중에 FORWARD_TRANSITION / PATH_FLIGHT / BACK_TRANSITION / LAND
- *   로 확장할 수 있도록 enum과 틀만 미리 만들어 둠.
+ * - Phase 3 목표:
+ *   * VehicleStatus Subscriber 추가
+ *   * OffboardPublisher 모듈화 (PX4OffboardInterface)
+ *   * VehicleCommandClient 구현
+ *   * Hover 로직 분리 (HoverController)
  ****************************************************************************/
 
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
+#include <px4_msgs/msg/vehicle_status.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 #include <stdint.h>
@@ -25,116 +29,248 @@ using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
 
 // ─────────────────────────────────────
-// 1. 미션 Phase 정의 (확장 버전)
+// 0. 미션 Phase 정의
 // ─────────────────────────────────────
 enum class MissionPhase {
-	IDLE,               // 아무것도 안 함 (대기)
-	TAKEOFF,            // 이륙 (목표 고도로 올라가는 중)
-	HOVER,              // 목표 고도 호버
-	FORWARD_TRANSITION, // VTOL -> 고정익 전환
-	PATH_FLIGHT,        // 고정익 경로 비행
-	BACK_TRANSITION,    // 고정익 -> VTOL 전환
-	LAND,               // 착륙
-	DONE                // 미션 종료
+	IDLE,
+	TAKEOFF,
+	HOVER,
+	FORWARD_TRANSITION,
+	PATH_FLIGHT,
+	BACK_TRANSITION,
+	LAND,
+	DONE
 };
 
 // ─────────────────────────────────────
-// 2. 메인 노드 클래스
+// 1. VehicleCommandClient: VehicleCommand 전용 헬퍼
+// ─────────────────────────────────────
+class VehicleCommandClient
+{
+public:
+	explicit VehicleCommandClient(rclcpp::Node & node)
+	{
+		vehicle_command_pub_ =
+			node.create_publisher<VehicleCommand>("/fmu/in/vehicle_command", 10);
+		node_ = &node;
+	}
+
+	void send_command(uint16_t command,
+	                  float param1 = 0.0f,
+	                  float param2 = 0.0f)
+	{
+		VehicleCommand msg{};
+		msg.param1 = param1;
+		msg.param2 = param2;
+		msg.command = command;
+		msg.target_system = 1;
+		msg.target_component = 1;
+		msg.source_system = 1;
+		msg.source_component = 1;
+		msg.from_external = true;
+		msg.timestamp = node_->get_clock()->now().nanoseconds() / 1000;
+
+		vehicle_command_pub_->publish(msg);
+	}
+
+	// 편의 함수들
+	void arm()
+	{
+		send_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0f);
+		RCLCPP_INFO(node_->get_logger(), "Arm command sent");
+	}
+
+	void disarm()
+	{
+		send_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0f);
+		RCLCPP_INFO(node_->get_logger(), "Disarm command sent");
+	}
+
+	void set_offboard_mode()
+	{
+		// PX4 문서 기준: main_mode = 1, sub_mode = 6 → Offboard
+		send_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1.0f, 6.0f);
+		RCLCPP_INFO(node_->get_logger(), "Offboard mode command sent");
+	}
+
+private:
+	rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_pub_;
+	rclcpp::Node * node_{nullptr};
+};
+
+// ─────────────────────────────────────
+// 2. PX4OffboardInterface: OffboardControlMode + TrajectorySetpoint
+// ─────────────────────────────────────
+class PX4OffboardInterface
+{
+public:
+	explicit PX4OffboardInterface(rclcpp::Node & node)
+	: cmd_client_(node)
+	{
+		offboard_control_mode_pub_ =
+			node.create_publisher<OffboardControlMode>("/fmu/in/offboard_control_mode", 10);
+		trajectory_setpoint_pub_ =
+			node.create_publisher<TrajectorySetpoint>("/fmu/in/trajectory_setpoint", 10);
+		node_ = &node;
+	}
+
+	VehicleCommandClient & command_client() { return cmd_client_; }
+
+	// position 모드 OffboardControlMode 보내기
+	void publish_position_control_mode()
+	{
+		OffboardControlMode msg{};
+		msg.position = true;
+		msg.velocity = false;
+		msg.acceleration = false;
+		msg.attitude = false;
+		msg.body_rate = false;
+		msg.timestamp = node_->get_clock()->now().nanoseconds() / 1000;
+		offboard_control_mode_pub_->publish(msg);
+	}
+
+	// 간단 position+yaw setpoint
+	void publish_position_setpoint(float x, float y, float z, float yaw)
+	{
+		TrajectorySetpoint sp{};
+		sp.position = {x, y, z};
+		sp.yaw = yaw;
+		sp.timestamp = node_->get_clock()->now().nanoseconds() / 1000;
+		trajectory_setpoint_pub_->publish(sp);
+	}
+
+	// TrajectorySetpoint 전체를 넘겨서 퍼블리시
+	void publish_trajectory(const TrajectorySetpoint & sp)
+	{
+		TrajectorySetpoint msg = sp;
+		msg.timestamp = node_->get_clock()->now().nanoseconds() / 1000;
+		trajectory_setpoint_pub_->publish(msg);
+	}
+
+private:
+	rclcpp::Publisher<OffboardControlMode>::SharedPtr offboard_control_mode_pub_;
+	rclcpp::Publisher<TrajectorySetpoint>::SharedPtr trajectory_setpoint_pub_;
+	VehicleCommandClient cmd_client_;
+	rclcpp::Node * node_{nullptr};
+};
+
+// ─────────────────────────────────────
+// 3. HoverController: Hover setpoint 생성 전용
+// ─────────────────────────────────────
+class HoverController
+{
+public:
+	HoverController(float tgt_alt_m = -5.0f, float tgt_yaw_rad = -3.14f)
+	: target_altitude_m_(tgt_alt_m),
+	  target_yaw_rad_(tgt_yaw_rad)
+	{}
+
+	void set_target_altitude(float alt_m) { target_altitude_m_ = alt_m; }
+	void set_target_yaw(float yaw_rad) { target_yaw_rad_ = yaw_rad; }
+
+	// 현재는 (0,0,z) 고정 호버 — 나중에 x,y도 미션에 맞게 확장 가능
+	TrajectorySetpoint create_setpoint() const
+	{
+		TrajectorySetpoint sp{};
+		sp.position = {0.0f, 0.0f, target_altitude_m_};
+		sp.yaw = target_yaw_rad_;
+		return sp;
+	}
+
+	float target_altitude() const { return target_altitude_m_; }
+
+private:
+	float target_altitude_m_{-5.0f}; // NED: 위로 갈수록 음수
+	float target_yaw_rad_{-3.14f};
+};
+
+// ─────────────────────────────────────
+// 4. 메인 노드: Mission Layer
 // ─────────────────────────────────────
 class OffboardMissionNode : public rclcpp::Node
 {
 public:
 	OffboardMissionNode()
-	: Node("offboard_mission_node")
+	: Node("offboard_mission_node"),
+	  px4_if_(*this),
+	  hover_ctrl_(-5.0f, -3.14f)
 	{
-		// ▼ PX4로 보내는 Publisher들
-		offboard_control_mode_publisher_ =
-			this->create_publisher<OffboardControlMode>("/fmu/in/offboard_control_mode", 10);
-		trajectory_setpoint_publisher_ =
-			this->create_publisher<TrajectorySetpoint>("/fmu/in/trajectory_setpoint", 10);
-		vehicle_command_publisher_ =
-			this->create_publisher<VehicleCommand>("/fmu/in/vehicle_command", 10);
+		// ▼ Vehicle Odometry (고도용)
+		vehicle_odometry_sub_ =
+			this->create_subscription<VehicleOdometry>(
+				"/fmu/out/vehicle_odometry",
+				rclcpp::SensorDataQoS(),
+				[this](const VehicleOdometry::SharedPtr msg)
+				{
+					current_z_ = msg->position[2];  // NED: z (Down, 위로 갈수록 음수)
+				});
 
-		vehicle_odometry_sub_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
-			"/fmu/out/vehicle_odometry",
-			rclcpp::SensorDataQoS(),  // ← 이걸로 바꾸기
-			[this](const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
-			{
-				current_z_ = msg->position[2];
-			}
-		);
+		// ▼ Vehicle Status (arming 상태, nav_state 등)
+		vehicle_status_sub_ =
+			this->create_subscription<VehicleStatus>(
+				"/fmu/out/vehicle_status",
+				rclcpp::SensorDataQoS(),
+				[this](const VehicleStatus::SharedPtr msg)
+				{
+					last_vehicle_status_ = *msg;
+					has_vehicle_status_ = true;
+					// 필요하면 디버그 로그:
+					// RCLCPP_INFO(this->get_logger(), "VehicleStatus: armed=%d", msg->arming_state);
+				});
 
 		offboard_setpoint_counter_ = 0;
 		phase_ = MissionPhase::IDLE;
 		phase_tick_ = 0;
-		target_altitude_m_ = -5.0f; // NED 기준 -5m (위로 5m)
 
-		// ▼ 100 ms마다 한 번씩 호출되는 메인 루프
+		target_altitude_m_ = hover_ctrl_.target_altitude();
+
+		// ▼ 100 ms 메인 루프
 		auto timer_callback = [this]() -> void {
 			this->on_timer();
 		};
-
 		timer_ = this->create_wall_timer(100ms, timer_callback);
 	}
-
-	void arm();
-	void disarm();
 
 private:
 	// 타이머
 	rclcpp::TimerBase::SharedPtr timer_;
 
-	// Publisher들
-	rclcpp::Publisher<OffboardControlMode>::SharedPtr offboard_control_mode_publisher_;
-	rclcpp::Publisher<TrajectorySetpoint>::SharedPtr trajectory_setpoint_publisher_;
-	rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_publisher_;
+	// Interface Layer
+	PX4OffboardInterface px4_if_;
+	HoverController      hover_ctrl_;
 
 	// Subscriber들
-	rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr vehicle_odometry_sub_;
+	rclcpp::Subscription<VehicleOdometry>::SharedPtr vehicle_odometry_sub_;
+	rclcpp::Subscription<VehicleStatus>::SharedPtr   vehicle_status_sub_;
+
+	// Vehicle Status 보관
+	VehicleStatus last_vehicle_status_{};
+	bool          has_vehicle_status_{false};
 
 	// 내부 상태
 	std::atomic<uint64_t> timestamp_{0};
 	uint64_t offboard_setpoint_counter_{0};
 
-	// 미션 FSM 관련 상태
 	MissionPhase phase_{MissionPhase::IDLE};
-	uint64_t     phase_tick_{0};          // 해당 Phase에서 경과 tick 수 (100ms 단위)
-	float        target_altitude_m_{-5.0f}; // NED z target (위로 갈수록 음수)
+	uint64_t     phase_tick_{0};
+	float        target_altitude_m_{-5.0f};  // HoverController와 동일하게 유지
 
-	// PX4 상태 변수(간단히 z만)
-	float current_z_{0.0f};
+	float current_z_{0.0f}; // NED z
 
 	// 내부 함수들
-	void on_timer();  // 타이머 콜백 본체
+	void on_timer();
 
-	// 상태 머신 관련
+	// 상태 머신
 	void update_mission_state();
 	void change_phase(MissionPhase new_phase);
 	const char* phase_to_string(MissionPhase p);
 
-	// PX4 퍼블리시 함수들
-	void publish_offboard_control_mode();
-	void publish_trajectory_setpoint_for_phase();
-	void publish_vehicle_command(uint16_t command, float param1 = 0.0f, float param2 = 0.0f);
+	// Hover/Takeoff 등 Phase별 setpoint 생성
+	void publish_setpoint_for_phase();
 };
 
 // ─────────────────────────────────────
-// 3. Vehicle ARM / DISARM
-// ─────────────────────────────────────
-void OffboardMissionNode::arm()
-{
-	publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0f);
-	RCLCPP_INFO(this->get_logger(), "Arm command sent");
-}
-
-void OffboardMissionNode::disarm()
-{
-	publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0f);
-	RCLCPP_INFO(this->get_logger(), "Disarm command sent");
-}
-
-// ─────────────────────────────────────
-// 4. Phase 이름 문자열 변환
+// 4-1. Phase 이름 문자열 변환
 // ─────────────────────────────────────
 const char* OffboardMissionNode::phase_to_string(MissionPhase p)
 {
@@ -152,7 +288,7 @@ const char* OffboardMissionNode::phase_to_string(MissionPhase p)
 }
 
 // ─────────────────────────────────────
-// 5. Phase 변경 공용 함수
+// 4-2. Phase 변경 공용 함수
 // ─────────────────────────────────────
 void OffboardMissionNode::change_phase(MissionPhase new_phase)
 {
@@ -167,18 +303,18 @@ void OffboardMissionNode::change_phase(MissionPhase new_phase)
 		phase_to_string(new_phase));
 
 	phase_ = new_phase;
-	phase_tick_ = 0; // 새 Phase 진입 시 tick 리셋
+	phase_tick_ = 0;
 }
 
 // ─────────────────────────────────────
-// 6. 상태 전환 로직 (FSM 본체)
+// 4-3. 상태 전환 로직 (FSM)
 // ─────────────────────────────────────
 void OffboardMissionNode::update_mission_state()
 {
 	switch (phase_) {
 
 	case MissionPhase::IDLE:
-		// ★ 첫 시작에서는 IDLE -> TAKEOFF으로 1회만 진입
+		// 첫 시작에서 TAKEOFF 진입
 		if (offboard_setpoint_counter_ == 0) {
 			change_phase(MissionPhase::TAKEOFF);
 		}
@@ -186,169 +322,126 @@ void OffboardMissionNode::update_mission_state()
 
 	case MissionPhase::TAKEOFF:
 	{
-		// current_z_ (예: -5.0f)와 target_altitude_m_ (예: -5.0f) 비교
 		const float z_err = current_z_ - target_altitude_m_;
-		if (std::fabs(z_err) < 0.3f) { // ±0.3m 이내면 목표 고도 도달로 간주
+		// RCLCPP_INFO(this->get_logger(), "TAKEOFF: z=%.2f target=%.2f err=%.2f",
+		//             current_z_, target_altitude_m_, z_err);
+
+		if (std::fabs(z_err) < 0.3f) {
 			change_phase(MissionPhase::HOVER);
 		}
 		break;
 	}
 
 	case MissionPhase::HOVER:
-		// HOVER 상태를 10초 정도 유지 후 DONE으로 전환
-		// 100ms * 100tick = 10초 근사
+		// 약 10초 호버 후 DONE으로
 		if (phase_tick_ > 100) {
 			change_phase(MissionPhase::DONE);
 		}
 		break;
 
 	case MissionPhase::FORWARD_TRANSITION:
-		// TODO: Phase 4에서 구현 예정
+		// TODO: Phase 4에서 구현
 		break;
 
 	case MissionPhase::PATH_FLIGHT:
-		// TODO: Phase 4에서 구현 예정
+		// TODO
 		break;
 
 	case MissionPhase::BACK_TRANSITION:
-		// TODO: Phase 4에서 구현 예정
+		// TODO
 		break;
 
 	case MissionPhase::LAND:
-		// TODO: Phase 4에서 구현 예정
+		// TODO
 		break;
 
 	case MissionPhase::DONE:
-		// 미션 종료 상태: 필요하면 여기서 disarm, land 명령 등 수행
+		// 필요시 여기서 disarm 등 호출 가능
 		break;
 	}
 
-	// 현재 Phase에서의 경과 tick 증가
 	phase_tick_++;
 }
 
 // ─────────────────────────────────────
-// 7. 타이머 콜백 본체
+// 4-4. Phase별 setpoint 생성 + 퍼블리시
+// ─────────────────────────────────────
+void OffboardMissionNode::publish_setpoint_for_phase()
+{
+	switch (phase_) {
+
+	case MissionPhase::IDLE:
+		// Offboard 유지용 (0,0,0)
+		px4_if_.publish_position_setpoint(0.0f, 0.0f, 0.0f, 0.0f);
+		break;
+
+	case MissionPhase::TAKEOFF:
+	{
+		// TAKEOFF도 HoverController의 목표 고도 setpoint 사용
+		TrajectorySetpoint sp = hover_ctrl_.create_setpoint();
+		px4_if_.publish_trajectory(sp);
+		break;
+	}
+
+	case MissionPhase::HOVER:
+	{
+		// 완전 분리된 HoverController에서 setpoint 생성
+		TrajectorySetpoint sp = hover_ctrl_.create_setpoint();
+		px4_if_.publish_trajectory(sp);
+		break;
+	}
+
+	case MissionPhase::FORWARD_TRANSITION:
+		// TODO: VTOL -> Fixed-wing 전환 시 setpoint
+		px4_if_.publish_position_setpoint(0.0f, 0.0f, target_altitude_m_, -3.14f);
+		break;
+
+	case MissionPhase::PATH_FLIGHT:
+		// TODO: waypoint 기반 경로 비행 setpoint
+		px4_if_.publish_position_setpoint(0.0f, 0.0f, target_altitude_m_, -3.14f);
+		break;
+
+	case MissionPhase::BACK_TRANSITION:
+		// TODO: Fixed-wing -> VTOL
+		px4_if_.publish_position_setpoint(0.0f, 0.0f, target_altitude_m_, -3.14f);
+		break;
+
+	case MissionPhase::LAND:
+		// TODO: 착륙 setpoint
+		px4_if_.publish_position_setpoint(0.0f, 0.0f, -0.5f, -3.14f);
+		break;
+
+	case MissionPhase::DONE:
+		// 미션 종료 후: 일단 호버 setpoint 유지
+		px4_if_.publish_position_setpoint(0.0f, 0.0f, target_altitude_m_, -3.14f);
+		break;
+	}
+}
+
+// ─────────────────────────────────────
+// 4-5. 타이머 콜백
 // ─────────────────────────────────────
 void OffboardMissionNode::on_timer()
 {
 	// 1) 일정 횟수 setpoint 보낸 뒤 Offboard 모드 전환 + ARM
 	if (offboard_setpoint_counter_ == 10) {
-		// PX4 모드를 Offboard 로 변경
-		publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
-		// ARM
-		arm();
+		px4_if_.command_client().set_offboard_mode();
+		px4_if_.command_client().arm();
 	}
 
-	// 2) 상태 머신 업데이트 (Phase 전환)
+	// 2) 상태 머신 업데이트
 	update_mission_state();
 
-	// 3) OffboardControlMode + TrajectorySetpoint 퍼블리시
-	publish_offboard_control_mode();
-	publish_trajectory_setpoint_for_phase();
+	// 3) OffboardControlMode + Phase별 setpoint
+	px4_if_.publish_position_control_mode();
+	publish_setpoint_for_phase();
 
 	// 4) 카운터 증가
 	offboard_setpoint_counter_++;
 }
 
 // ─────────────────────────────────────
-// 8. OffboardControlMode 퍼블리시
-// ─────────────────────────────────────
-void OffboardMissionNode::publish_offboard_control_mode()
-{
-	OffboardControlMode msg{};
-	msg.position = true;
-	msg.velocity = false;
-	msg.acceleration = false;
-	msg.attitude = false;
-	msg.body_rate = false;
-	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-	offboard_control_mode_publisher_->publish(msg);
-}
-
-// ─────────────────────────────────────
-// 9. Phase 기반 Trajectory Setpoint 생성
-// ─────────────────────────────────────
-void OffboardMissionNode::publish_trajectory_setpoint_for_phase()
-{
-	TrajectorySetpoint msg{};
-
-	switch (phase_) {
-
-	case MissionPhase::IDLE:
-		// IDLE일 때는 굳이 의미있는 setpoint가 필요 없지만,
-		// Offboard 유지용으로 (0,0,0)을 계속 보낼 수 있다.
-		msg.position = {0.0f, 0.0f, 0.0f};
-		msg.yaw = 0.0f;
-		break;
-
-	case MissionPhase::TAKEOFF:
-		// 목표 고도까지 올라가는 중: 목표 고도 setpoint
-		msg.position = {0.0f, 0.0f, target_altitude_m_};
-		msg.yaw = -3.14f; // [-PI:PI]
-		break;
-
-	case MissionPhase::HOVER:
-		// TAKEOFF와 같은 setpoint를 유지해도 실제로는 호버
-		msg.position = {0.0f, 0.0f, target_altitude_m_};
-		msg.yaw = -3.14f;
-		break;
-
-	case MissionPhase::FORWARD_TRANSITION:
-		// TODO: VTOL -> 고정익 전환 시 setpoint 정의 예정
-		msg.position = {0.0f, 0.0f, target_altitude_m_};
-		msg.yaw = -3.14f;
-		break;
-
-	case MissionPhase::PATH_FLIGHT:
-		// TODO: waypoint 기반 setpoint 생성 예정
-		msg.position = {0.0f, 0.0f, target_altitude_m_};
-		msg.yaw = -3.14f;
-		break;
-
-	case MissionPhase::BACK_TRANSITION:
-		// TODO: 고정익 -> VTOL 전환 시 setpoint
-		msg.position = {0.0f, 0.0f, target_altitude_m_};
-		msg.yaw = -3.14f;
-		break;
-
-	case MissionPhase::LAND:
-		// TODO: 착륙 시 내려가는 프로파일 등
-		msg.position = {0.0f, 0.0f, -0.5f}; // 예: 지면 근처까지
-		msg.yaw = -3.14f;
-		break;
-
-	case MissionPhase::DONE:
-		// 미션 종료 후: 일단 목표 고도 유지 (필요시 바꿔도 됨)
-		msg.position = {0.0f, 0.0f, target_altitude_m_};
-		msg.yaw = -3.14f;
-		break;
-	}
-
-	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-	trajectory_setpoint_publisher_->publish(msg);
-}
-
-// ─────────────────────────────────────
-// 10. VehicleCommand 퍼블리시
-// ─────────────────────────────────────
-void OffboardMissionNode::publish_vehicle_command(uint16_t command, float param1, float param2)
-{
-	VehicleCommand msg{};
-	msg.param1 = param1;
-	msg.param2 = param2;
-	msg.command = command;
-	msg.target_system = 1;
-	msg.target_component = 1;
-	msg.source_system = 1;
-	msg.source_component = 1;
-	msg.from_external = true;
-	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-	vehicle_command_publisher_->publish(msg);
-}
-
-// ─────────────────────────────────────
-// 11. main 함수
+// 5. main 함수
 // ─────────────────────────────────────
 int main(int argc, char *argv[])
 {
