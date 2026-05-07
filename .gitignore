@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ROS 빌드 결과
+build/
+devel/
+install/
+*.log
+
+# 에디터
+.vscode/
+.idea/
+*.swp
+*~
+
+# 시스템
+.DS_Store
+Thumbs.db
+
+# PX4 로그
+*.ulg
+log/
