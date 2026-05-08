@@ -210,5 +210,7 @@ include_directories(
 
 catkin_install_python(PROGRAMS
   scripts/takeoff.py
+  scripts/svg_parser.py
+  scripts/svg_mission.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

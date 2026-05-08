@@ -112,6 +112,11 @@ class DroneTakeoff:
         # 2. 잠시 대기 (시스템 안정화)
         rospy.sleep(2)
         
+        # 4. 시동
+        if not self.arm():
+            rospy.logerr("시동 실패. 종료.")
+            return
+        
         # 3. AUTO.TAKEOFF 모드로 변경
         if not self.set_mode("AUTO.TAKEOFF"):
             rospy.logerr("모드 변경 실패. 종료.")
@@ -119,10 +124,6 @@ class DroneTakeoff:
         
         rospy.sleep(1)
         
-        # 4. 시동
-        if not self.arm():
-            rospy.logerr("시동 실패. 종료.")
-            return
         
         rospy.loginfo("=" * 40)
         rospy.loginfo("이륙 시작! 가제보 화면을 확인하세요 🚁")

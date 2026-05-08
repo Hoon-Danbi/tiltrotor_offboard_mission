@@ -1,0 +1,41 @@
+<launch>
+  <!--
+    SVG 경로 추종 미션 런치 파일
+
+    사용 예:
+      # 기본 (샘플 하트 SVG, scale=0.05 m/px, 고도 5m)
+      roslaunch tiltrotor_offboard_mission svg_mission.launch
+
+      # 커스텀 SVG + 파라미터 변경
+      roslaunch tiltrotor_offboard_mission svg_mission.launch \
+        svg_file:=/path/to/your.svg \
+        scale:=0.1 \
+        altitude:=8.0
+
+    파라미터 설명:
+      svg_file   : SVG 파일 절대 경로
+      scale      : 1px = scale 미터  (예: 0.05 → 100px = 5m)
+      altitude   : 미션 비행 고도 (m)
+      wp_radius  : waypoint 도달 판정 반경 (m), 작을수록 정밀하지만 느림
+      wp_timeout : waypoint당 최대 대기 시간 (s)
+  -->
+
+  <arg name="svg_file"   default="$(find tiltrotor_offboard_mission)/assets/mission.svg"/>
+  <arg name="scale"      default="0.5"/>
+  <arg name="altitude"   default="30.0"/>
+  <arg name="wp_radius"  default="0.4"/>
+  <arg name="wp_timeout" default="8.0"/>
+
+  <node
+    pkg  ="tiltrotor_offboard_mission"
+    type ="svg_mission.py"
+    name ="svg_mission_node"
+    output="screen"
+  >
+    <param name="svg_file"   value="$(arg svg_file)"/>
+    <param name="scale"      value="$(arg scale)"/>
+    <param name="altitude"   value="$(arg altitude)"/>
+    <param name="wp_radius"  value="$(arg wp_radius)"/>
+    <param name="wp_timeout" value="$(arg wp_timeout)"/>
+  </node>
+</launch>
