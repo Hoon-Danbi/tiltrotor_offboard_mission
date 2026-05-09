@@ -10,9 +10,13 @@ project(tiltrotor_offboard_mission)
 find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   mavros_msgs
+  nav_msgs
   rospy
   sensor_msgs
   std_msgs
+  std_srvs
+  tf2_ros
+  visualization_msgs
 )
 
 ## System dependencies are found with CMake's conventions
@@ -107,7 +111,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES tiltrotor_offboard_mission
-#  CATKIN_DEPENDS geometry_msgs mavros_msgs rospy sensor_msgs std_msgs
+#  CATKIN_DEPENDS geometry_msgs mavros_msgs rospy std_msgs tf visualization_msgs
 #  DEPENDS system_lib
 )
 
@@ -212,5 +216,6 @@ catkin_install_python(PROGRAMS
   scripts/takeoff.py
   scripts/svg_parser.py
   scripts/svg_mission.py
+  scripts/rviz_painter.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

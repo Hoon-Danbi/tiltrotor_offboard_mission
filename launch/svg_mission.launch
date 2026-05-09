@@ -38,4 +38,9 @@
     <param name="wp_radius"  value="$(arg wp_radius)"/>
     <param name="wp_timeout" value="$(arg wp_timeout)"/>
   </node>
+
+  <node pkg="rviz" type="rviz" name="rviz" 
+          args="-d $(find tiltrotor_offboard_mission)/config/trajectory_nodes.rviz" 
+          output="screen" />
+          
 </launch>
